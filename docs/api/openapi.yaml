@@ -1,0 +1,1562 @@
+openapi: 3.1.0
+info:
+  title: workingRun API
+  version: 1.0.0
+  description: |
+    API ของระบบ workingRun (Next.js Route Handlers บน Cloudflare Workers → Supabase)
+
+    **การยืนยันตัวตน** — คุกกี้ session แบบ httpOnly ที่ได้จาก `POST /auth/login`
+    server ส่ง JWT ของผู้ใช้ต่อให้ Supabase ทุกครั้ง ดังนั้น RLS ในฐานข้อมูลยังบังคับใช้อยู่เสมอ
+
+    **สิทธิ์ (x-roles)** — `public` = ไม่ต้องล็อกอิน, `any` = ล็อกอินแล้วทุก role,
+    `runner` = ผู้มีสิทธิ์เล่นในฤดูกาล, `approver`, `admin` (1 คนมีได้หลาย role)
+
+    **ด่านบังคับ** — ถ้ายังไม่เปลี่ยนรหัสผ่านครั้งแรก หรือยังไม่ยอมรับประกาศความเป็นส่วนตัว
+    ทุก endpoint นอกจาก `/auth/*`, `GET /me`, `GET /privacy-notice`, `POST /me/privacy-consent`
+    จะตอบ 403 `PASSWORD_CHANGE_REQUIRED` หรือ `CONSENT_REQUIRED`
+
+    **รูปแบบข้อมูล** — วันที่ (`date`) = วันตามปฏิทินกรุงเทพฯ `YYYY-MM-DD` (ค.ศ.),
+    เวลา (`date-time`) = ISO-8601 UTC; การแสดงผล พ.ศ./"14:25 น." ทำที่ฝั่งหน้าเว็บ
+
+    **ภาษา** — header `Accept-Language: th | en` (ค่าเริ่มต้นตาม `profiles.locale`) ใช้กับ `error.message`
+servers:
+  - url: /api/v1
+tags:
+  - name: Auth
+  - name: Me
+  - name: Seasons
+  - name: Leaderboard
+  - name: Runs
+  - name: Review
+  - name: Admin - Seasons
+  - name: Admin - Users
+  - name: Admin - Reports
+  - name: Admin - System
+
+paths:
+  # ===========================================================================
+  # Auth
+  # ===========================================================================
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: ล็อกอินด้วยรหัสพนักงาน + รหัสผ่าน (ต้องผ่าน Cloudflare Turnstile)
+      x-roles: [public]
+      x-rate-limit: 10 ครั้ง/นาที/IP (Cloudflare rate limiting rule) + ล็อกบัญชี 15 นาทีหลังผิด 5 ครั้ง
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, turnstileToken]
+              properties:
+                username: { type: string, example: EMP001, pattern: '^[A-Za-z0-9._-]{3,32}$' }
+                password: { type: string, format: password, minLength: 1, maxLength: 128 }
+                turnstileToken: { type: string }
+      responses:
+        '200':
+          description: สำเร็จ — ตั้งคุกกี้ session
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '400': { $ref: '#/components/responses/TurnstileFailed' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '423': { $ref: '#/components/responses/AccountLocked' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: ออกจากระบบ
+      x-roles: [any]
+      responses:
+        '204': { description: ลบคุกกี้ session แล้ว }
+
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: เปลี่ยนรหัสผ่าน (บังคับครั้งแรก)
+      x-roles: [any]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, format: password }
+                newPassword:
+                  type: string
+                  format: password
+                  minLength: 10
+                  maxLength: 128
+                  description: อย่างน้อย 10 ตัว มีตัวอักษรและตัวเลข และต้องไม่ตรงกับรหัสพนักงาน
+      responses:
+        '204': { description: เปลี่ยนแล้ว — `mustChangePassword` เป็น false }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+
+  # ===========================================================================
+  # Me
+  # ===========================================================================
+  /me:
+    get:
+      tags: [Me]
+      summary: ข้อมูลผู้ใช้ปัจจุบัน บทบาท และสถานะด่านบังคับ
+      x-roles: [any]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    patch:
+      tags: [Me]
+      summary: แก้ชื่อที่แสดงและภาษา
+      x-roles: [any]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 60 }
+                locale: { $ref: '#/components/schemas/Locale' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /privacy-notice:
+    get:
+      tags: [Me]
+      summary: ประกาศความเป็นส่วนตัวฉบับปัจจุบัน
+      x-roles: [any]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, bodyMarkdown]
+                properties:
+                  version: { type: string, example: '2569-1' }
+                  bodyMarkdown: { type: string }
+
+  /me/privacy-consent:
+    post:
+      tags: [Me]
+      summary: ยอมรับประกาศความเป็นส่วนตัว
+      x-roles: [any]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: string }
+      responses:
+        '204': { description: บันทึกแล้ว }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /me/deletion-request:
+    post:
+      tags: [Me]
+      summary: ขอลบข้อมูล (แอดมินดำเนินการ — ปิดบัญชีและลบรูป, เก็บประวัติคะแนน)
+      x-roles: [any]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: สร้างคำขอแล้ว
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeletionRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ===========================================================================
+  # Seasons
+  # ===========================================================================
+  /seasons:
+    get:
+      tags: [Seasons]
+      summary: รายการฤดูกาล (ใหม่สุดก่อน) — แอดมินเห็นฉบับร่างด้วย
+      x-roles: [any]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Season' } }
+
+  /seasons/current:
+    get:
+      tags: [Seasons]
+      summary: ฤดูกาลที่เปิดอยู่ + กติกาปัจจุบัน + ฉันมีสิทธิ์เล่นไหม
+      x-roles: [any]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [season, rules, isParticipant]
+                properties:
+                  season: { $ref: '#/components/schemas/Season' }
+                  rules: { $ref: '#/components/schemas/SeasonRules' }
+                  isParticipant: { type: boolean }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /seasons/{seasonId}:
+    get:
+      tags: [Seasons]
+      summary: รายละเอียดฤดูกาล
+      x-roles: [any]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Season' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /seasons/{seasonId}/rules:
+    get:
+      tags: [Seasons]
+      summary: กติกาทุกเวอร์ชันของฤดูกาล (ใหม่สุดก่อน)
+      x-roles: [any]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/SeasonRules' } }
+
+  /departments:
+    get:
+      tags: [Seasons]
+      summary: รายการแผนก (ใช้แสดงในตารางคะแนนและตัวกรอง)
+      x-roles: [any]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Department' } }
+
+  # ===========================================================================
+  # Leaderboard (หน้าหลัก)
+  # ===========================================================================
+  /seasons/{seasonId}/leaderboard/version:
+    get:
+      tags: [Leaderboard]
+      summary: เลขเวอร์ชันตารางคะแนน — หน้าเว็บถามทุก 10 วินาทีขณะเปิดแท็บ
+      description: |
+        ตรวจ session ก่อนทุกครั้ง แล้วอ่านจาก Workers Cache API (เก็บ 5 วินาที)
+        → ผู้ชมกี่คนก็ถามฐานข้อมูลไม่เกิน 1 ครั้ง/5 วินาที; response ไปยังเบราว์เซอร์เป็น `Cache-Control: private, no-store`
+      x-roles: [any]
+      x-cache: 'Workers Cache API 5s (หลังตรวจสิทธิ์)'
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version]
+                properties:
+                  version: { type: integer, format: int64, example: 17 }
+
+  /seasons/{seasonId}/leaderboard:
+    get:
+      tags: [Leaderboard]
+      summary: ตารางคะแนนทั้งหมด + ผู้มีสิทธิ์ที่ยังไม่มีคะแนน
+      description: |
+        ส่ง `v` = เวอร์ชันจาก endpoint ด้านบน → server เก็บผลลัพธ์ใน Workers Cache API ตามเวอร์ชัน (หลังตรวจสิทธิ์)
+        ข้อมูลเหมือนกันทุกผู้ชม (ไม่มีฟิลด์เฉพาะคน) หน้าเว็บหาแถวของตัวเองจาก `userId` ของ `/me`
+        และเทียบข้อมูลเก่า/ใหม่เองเพื่อเล่นแอนิเมชัน (สนามแข่ง 5 อันดับแรก, แถวเลื่อน, ตัวเลขนับขึ้น)
+      x-roles: [any]
+      x-cache: 'Workers Cache API ตามเวอร์ชัน (หลังตรวจสิทธิ์)'
+      parameters:
+        - { $ref: '#/components/parameters/SeasonId' }
+        - { name: v, in: query, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Leaderboard' }
+
+  /seasons/{seasonId}/activity:
+    get:
+      tags: [Leaderboard]
+      summary: แถบความเคลื่อนไหวล่าสุด เช่น "ธนพล ส. วิ่ง 3.0 กม. +30"
+      x-roles: [any]
+      x-cache: 'Workers Cache API 5s (หลังตรวจสิทธิ์)'
+      parameters:
+        - { $ref: '#/components/parameters/SeasonId' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ActivityItem' } }
+
+  /seasons/{seasonId}/me/stats:
+    get:
+      tags: [Leaderboard]
+      summary: สถิติของฉัน — อันดับ ระยะสะสม จำนวนครั้ง และรายการรอตรวจ
+      x-roles: [any]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MyStats' }
+
+  # ===========================================================================
+  # Runs (พนักงาน)
+  # ===========================================================================
+  /uploads/evidence:
+    post:
+      tags: [Runs]
+      summary: อัปโหลดรูปหลักฐาน 1 รูป (บีบอัดเป็น WebP และลบ EXIF ที่มือถือก่อนส่ง)
+      description: |
+        Worker เก็บไฟล์ใน R2 ที่ `evidence/{profileId}/{uuid}.{ext}` และคำนวณ SHA-256 เอง
+        ไฟล์ที่อัปโหลดแต่ไม่ถูกผูกกับรายการวิ่งภายใน 24 ชม. จะถูกลบโดย cron
+      x-roles: [runner]
+      x-rate-limit: 30 ไฟล์/ชั่วโมง/ผู้ใช้
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: image/jpeg, image/png, image/webp, image/heic — ไม่เกิน 2 MB
+      responses:
+        '201':
+          description: อัปโหลดแล้ว
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadedEvidence' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '413': { $ref: '#/components/responses/FileTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedFileType' }
+
+  /runs:
+    post:
+      tags: [Runs]
+      summary: บันทึกการวิ่ง (สถานะเริ่มต้น "รอตรวจสอบ")
+      description: |
+        **ห้ามส่ง** (ตอบ 422): วันที่ในอนาคต, ย้อนหลังเกินกติกา, ระยะต่ำกว่าขั้นต่ำ, ไม่อยู่ในฤดูกาลที่เปิด,
+        ไม่ใช่ผู้มีสิทธิ์, ไม่มีรูป · **ติดธง** (ยังบันทึกได้): pace ผิดปกติ, ระยะสูง, รวมต่อวันสูง, ซ้ำ
+        — runner ไม่เห็นธงของตัวเอง (กันการเลี่ยงเกณฑ์)
+      x-roles: [runner]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunCreate' }
+      responses:
+        '201':
+          description: บันทึกแล้ว
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /runs/mine:
+    get:
+      tags: [Runs]
+      summary: ประวัติการวิ่งของฉัน พร้อมสถานะและเหตุผลที่ถูกปฏิเสธ
+      x-roles: [any]
+      parameters:
+        - { name: seasonId, in: query, schema: { type: string, format: uuid }, description: ค่าเริ่มต้น = ฤดูกาลปัจจุบัน }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/RunStatus' } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK (เรียงวันที่วิ่งใหม่สุดก่อน)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Run' } }
+                  nextCursor: { type: [string, 'null'] }
+
+  /runs/{runId}:
+    get:
+      tags: [Runs]
+      summary: รายละเอียดรายการวิ่ง (เจ้าของ หรือ ผู้ตรวจ/แอดมิน)
+      x-roles: [runner (เจ้าของ), approver, admin]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '200':
+          description: OK — `flags` มีเฉพาะเมื่อผู้เรียกเป็นผู้ตรวจ/แอดมิน
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /runs/{runId}/cancel:
+    post:
+      tags: [Runs]
+      summary: ยกเลิกรายการของตัวเองที่ยังรอตรวจ (แก้ไขไม่ได้ — ยกเลิกแล้วส่งใหม่)
+      x-roles: [runner (เจ้าของ)]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '204': { description: ยกเลิกแล้ว }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /runs/{runId}/evidence/{evidenceId}:
+    get:
+      tags: [Runs]
+      summary: เปิดรูปหลักฐาน (stream จาก R2 หลังตรวจสิทธิ์)
+      x-roles: [runner (เจ้าของ), approver, admin]
+      x-cache: 'Cache-Control: private, max-age=300'
+      parameters:
+        - { $ref: '#/components/parameters/RunId' }
+        - { name: evidenceId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: ไฟล์รูป
+          content:
+            image/webp: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/heic: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/EvidencePurged' }
+
+  # ===========================================================================
+  # Review (ผู้ตรวจ)
+  # ===========================================================================
+  /review/queue:
+    get:
+      tags: [Review]
+      summary: คิวรายการรอตรวจ (เก่าสุดก่อน) พร้อมธงผิดปกติ
+      x-roles: [approver, admin]
+      parameters:
+        - { name: seasonId, in: query, schema: { type: string, format: uuid }, description: ค่าเริ่มต้น = ฤดูกาลปัจจุบัน }
+        - { name: flagged, in: query, schema: { type: boolean }, description: 'true = เฉพาะที่ติดธง, false = เฉพาะที่ไม่ติดธง' }
+        - { name: flag, in: query, schema: { $ref: '#/components/schemas/FlagCode' } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK — ไม่รวมรายการของผู้ตรวจเอง
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, totalPending]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/RunDetail' } }
+                  totalPending: { type: integer }
+                  nextCursor: { type: [string, 'null'] }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /review/runs/{runId}/decision:
+    post:
+      tags: [Review]
+      summary: อนุมัติ หรือ ปฏิเสธ 1 รายการ (ปฏิเสธต้องมีเหตุผล)
+      x-roles: [approver, admin]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewDecision' }
+      responses:
+        '200':
+          description: OK — คืนรายการหลังตรวจ
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /review/runs/bulk-decision:
+    post:
+      tags: [Review]
+      summary: อนุมัติ หรือ ปฏิเสธหลายรายการพร้อมกัน (สูงสุด 200) — สำเร็จทั้งหมดหรือไม่มีเลย
+      x-roles: [approver, admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ReviewDecision'
+                - type: object
+                  required: [runIds]
+                  properties:
+                    runIds:
+                      type: array
+                      minItems: 1
+                      maxItems: 200
+                      uniqueItems: true
+                      items: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [processed]
+                properties:
+                  processed: { type: integer }
+        '422':
+          description: มีบางรายการตรวจไม่ได้ — ไม่มีรายการใดถูกเปลี่ยน; `details.runId` บอกรายการที่ผิด
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /review/runs/{runId}/revoke:
+    post:
+      tags: [Review]
+      summary: เพิกถอนรายการที่อนุมัติแล้ว (หักคะแนนคืน ต้องมีเหตุผล)
+      x-roles: [approver, admin]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunDetail' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  # ===========================================================================
+  # Admin — ฤดูกาล กติกา ผู้มีสิทธิ์ คะแนน
+  # ===========================================================================
+  /admin/seasons:
+    post:
+      tags: [Admin - Seasons]
+      summary: สร้างฤดูกาล (สถานะร่าง — ได้กติกาค่าเริ่มต้นเวอร์ชัน 1 อัตโนมัติ)
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SeasonInput' }
+      responses:
+        '201':
+          description: สร้างแล้ว
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Season' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/seasons/{seasonId}:
+    patch:
+      tags: [Admin - Seasons]
+      summary: แก้ชื่อ/ช่วงวันที่ (ฤดูกาลที่ปิดแล้วแก้ไม่ได้)
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SeasonInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Season' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+    delete:
+      tags: [Admin - Seasons]
+      summary: ลบฤดูกาลฉบับร่าง (soft delete)
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      responses:
+        '204': { description: ลบแล้ว }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /admin/seasons/{seasonId}/activate:
+    post:
+      tags: [Admin - Seasons]
+      summary: เปิดฤดูกาล (มีฤดูกาลที่เปิดได้ทีละ 1)
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Season' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/seasons/{seasonId}/close:
+    post:
+      tags: [Admin - Seasons]
+      summary: ปิดฤดูกาล — ได้เฉพาะเมื่อตรวจครบทุกรายการแล้ว (ไม่มีการบังคับปิด)
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Season' }
+        '422':
+          description: '`SEASON_HAS_PENDING_RUNS` พร้อม `details.pending` = จำนวนที่ค้าง'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/seasons/{seasonId}/rules:
+    post:
+      tags: [Admin - Seasons]
+      summary: ตั้งกติกาเวอร์ชันใหม่ (ต้องมีเหตุผล) — เลือกคำนวณคะแนนย้อนหลังทั้งฤดูกาลได้
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/SeasonRulesInput'
+                - type: object
+                  required: [changeReason]
+                  properties:
+                    changeReason: { type: string, minLength: 1, maxLength: 500 }
+                    recalculate:
+                      type: boolean
+                      default: false
+                      description: true = ใช้อัตราใหม่กับรายการที่อนุมัติแล้วทั้งหมด (บันทึกส่วนต่างลงสมุดคะแนน)
+      responses:
+        '201':
+          description: สร้างเวอร์ชันใหม่แล้ว
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules]
+                properties:
+                  rules: { $ref: '#/components/schemas/SeasonRules' }
+                  recalculatedRuns: { type: integer }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /admin/seasons/{seasonId}/participants:
+    get:
+      tags: [Admin - Seasons]
+      summary: รายชื่อผู้มีสิทธิ์เล่นในฤดูกาล
+      x-roles: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/SeasonId' }
+        - { name: q, in: query, schema: { type: string }, description: ค้นรหัสพนักงานหรือชื่อ }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/UserSummary' } }
+                  total: { type: integer }
+                  nextCursor: { type: [string, 'null'] }
+    post:
+      tags: [Admin - Seasons]
+      summary: เพิ่มผู้มีสิทธิ์ด้วยรหัสพนักงาน (JSON) หรือไฟล์ CSV คอลัมน์ employee_code
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employeeCodes]
+              properties:
+                employeeCodes: { type: array, minItems: 1, maxItems: 2000, items: { type: string } }
+          text/csv:
+            schema: { type: string }
+      responses:
+        '200':
+          description: ผลการนำเข้า
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+
+  /admin/seasons/{seasonId}/participants/copy-from/{fromSeasonId}:
+    post:
+      tags: [Admin - Seasons]
+      summary: คัดลอกผู้มีสิทธิ์จากฤดูกาลอื่น (เฉพาะบัญชีที่ยังใช้งาน)
+      x-roles: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/SeasonId' }
+        - { name: fromSeasonId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [added]
+                properties:
+                  added: { type: integer }
+
+  /admin/seasons/{seasonId}/participants/{userId}:
+    delete:
+      tags: [Admin - Seasons]
+      summary: ถอนสิทธิ์เล่น (soft delete — คะแนนเดิมยังอยู่)
+      x-roles: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/SeasonId' }
+        - { $ref: '#/components/parameters/UserId' }
+      responses:
+        '204': { description: ถอนสิทธิ์แล้ว }
+
+  /admin/seasons/{seasonId}/adjustments:
+    post:
+      tags: [Admin - Seasons]
+      summary: ปรับคะแนนด้วยมือ (บวกหรือลบ ต้องมีเหตุผล — บันทึกลงสมุดคะแนน)
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/SeasonId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, points, reason]
+              properties:
+                userId: { type: string, format: uuid }
+                points: { type: number, not: { const: 0 }, minimum: -10000, maximum: 10000, multipleOf: 0.01 }
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '201':
+          description: บันทึกแล้ว
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LedgerEntry' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  # ===========================================================================
+  # Admin — รายงาน
+  # ===========================================================================
+  /admin/seasons/{seasonId}/users/{userId}:
+    get:
+      tags: [Admin - Reports]
+      summary: ดูอันดับรายคน — สถิติ ประวัติการวิ่ง และสมุดคะแนนทุกรายการ (ใคร ทำเมื่อไหร่ เพราะอะไร)
+      x-roles: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/SeasonId' }
+        - { $ref: '#/components/parameters/UserId' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, stats, runs, ledger]
+                properties:
+                  user: { $ref: '#/components/schemas/UserAdmin' }
+                  stats: { $ref: '#/components/schemas/MyStats' }
+                  runs: { type: array, items: { $ref: '#/components/schemas/RunDetail' } }
+                  ledger: { type: array, items: { $ref: '#/components/schemas/LedgerEntry' } }
+
+  /admin/seasons/{seasonId}/export:
+    get:
+      tags: [Admin - Reports]
+      summary: ส่งออก CSV (UTF-8 with BOM เพื่อให้ Excel แสดงภาษาไทยถูก)
+      description: |
+        - `leaderboard`: อันดับ, รหัสพนักงาน, ชื่อ, แผนก, ระยะรวม (กม.), จำนวนครั้ง, คะแนน, ถึงคะแนนเมื่อ (เวลาไทย)
+        - `runs`: ทุกรายการวิ่ง + สถานะ + ผู้ตรวจ + เหตุผล + ธง
+        - `ledger`: สมุดคะแนนทุกแถว
+      x-roles: [admin]
+      parameters:
+        - { $ref: '#/components/parameters/SeasonId' }
+        - name: type
+          in: query
+          required: true
+          schema: { type: string, enum: [leaderboard, runs, ledger] }
+      responses:
+        '200':
+          description: ไฟล์ CSV
+          headers:
+            Content-Disposition:
+              schema: { type: string, example: 'attachment; filename="workingrun-season-2-2569-leaderboard.csv"' }
+          content:
+            text/csv: { schema: { type: string } }
+
+  /admin/audit-logs:
+    get:
+      tags: [Admin - Reports]
+      summary: บันทึกตรวจสอบ (ใหม่สุดก่อน)
+      x-roles: [admin]
+      parameters:
+        - { name: entityType, in: query, schema: { type: string } }
+        - { name: entityId, in: query, schema: { type: string } }
+        - { name: actorId, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AuditLog' } }
+                  nextCursor: { type: [string, 'null'] }
+
+  # ===========================================================================
+  # Admin — ผู้ใช้และแผนก
+  # ===========================================================================
+  /admin/users:
+    get:
+      tags: [Admin - Users]
+      summary: ค้นหาผู้ใช้
+      x-roles: [admin]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: departmentId, in: query, schema: { type: string, format: uuid } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/Role' } }
+        - { name: active, in: query, schema: { type: boolean } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/UserAdmin' } }
+                  total: { type: integer }
+                  nextCursor: { type: [string, 'null'] }
+    post:
+      tags: [Admin - Users]
+      summary: เพิ่มพนักงาน 1 คน — ระบบสร้างรหัสผ่านชั่วคราว (แสดงครั้งเดียว)
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+      responses:
+        '201':
+          description: สร้างแล้ว
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, temporaryPassword]
+                properties:
+                  user: { $ref: '#/components/schemas/UserAdmin' }
+                  temporaryPassword: { type: string }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/users/import:
+    post:
+      tags: [Admin - Users]
+      summary: นำเข้าพนักงานจาก CSV (employee_code, display_name, department_code, roles)
+      description: |
+        คืนไฟล์ CSV รหัสผ่านชั่วคราวให้ดาวน์โหลดครั้งเดียว (ระบบไม่เก็บรหัสผ่านที่อ่านได้)
+        แถวที่รหัสพนักงานซ้ำจะถูกข้ามและแจ้งใน header `X-Import-Skipped`
+        ถ้าส่ง `seasonId` จะเพิ่มเป็นผู้มีสิทธิ์ในฤดูกาลนั้นด้วย
+      x-roles: [admin]
+      parameters:
+        - { name: seasonId, in: query, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          text/csv: { schema: { type: string } }
+      responses:
+        '200':
+          description: CSV ผลลัพธ์ (employee_code, display_name, temporary_password)
+          headers:
+            X-Import-Created: { schema: { type: integer } }
+            X-Import-Skipped: { schema: { type: integer } }
+          content:
+            text/csv: { schema: { type: string } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /admin/users/{userId}:
+    patch:
+      tags: [Admin - Users]
+      summary: แก้ชื่อที่แสดง แผนก หรือระงับ/เปิดใช้บัญชี
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 60 }
+                departmentId: { type: [string, 'null'], format: uuid }
+                isActive: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserAdmin' }
+
+  /admin/users/{userId}/roles:
+    put:
+      tags: [Admin - Users]
+      summary: กำหนดบทบาททั้งหมดของผู้ใช้ (ถอด admin ของตัวเองไม่ได้)
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles: { type: array, uniqueItems: true, items: { $ref: '#/components/schemas/Role' } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserAdmin' }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /admin/users/{userId}/reset-password:
+    post:
+      tags: [Admin - Users]
+      summary: รีเซ็ตรหัสผ่าน (ลืมรหัสผ่าน) — ได้รหัสชั่วคราวใหม่ และบังคับเปลี่ยนเมื่อล็อกอิน
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [temporaryPassword]
+                properties:
+                  temporaryPassword: { type: string }
+
+  /admin/users/{userId}/close-account:
+    post:
+      tags: [Admin - Users]
+      summary: ดำเนินการคำขอลบข้อมูล — ปิดบัญชี ลบรูปทั้งหมด ยกเลิกรายการรอตรวจ (เก็บชื่อ คะแนน อันดับไว้)
+      x-roles: [admin]
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deletionRequestId: { type: string, format: uuid }
+      responses:
+        '204': { description: ปิดบัญชีแล้ว }
+        '422': { $ref: '#/components/responses/BusinessRuleViolation' }
+
+  /admin/deletion-requests:
+    get:
+      tags: [Admin - Users]
+      summary: คำขอลบข้อมูล
+      x-roles: [admin]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, completed, rejected] } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/DeletionRequest' } }
+
+  /admin/deletion-requests/{requestId}/reject:
+    post:
+      tags: [Admin - Users]
+      summary: ปฏิเสธคำขอลบข้อมูล (ต้องมีเหตุผล)
+      x-roles: [admin]
+      parameters:
+        - { name: requestId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeletionRequest' }
+
+  /admin/departments:
+    post:
+      tags: [Admin - Users]
+      summary: เพิ่มแผนก
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepartmentInput' }
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Department' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/departments/{departmentId}:
+    patch:
+      tags: [Admin - Users]
+      summary: แก้แผนก
+      x-roles: [admin]
+      parameters:
+        - { name: departmentId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepartmentInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Department' }
+    delete:
+      tags: [Admin - Users]
+      summary: ลบแผนก (soft delete — ผู้ใช้ในแผนกยังอยู่ แต่ไม่แสดงแผนก)
+      x-roles: [admin]
+      parameters:
+        - { name: departmentId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: ลบแล้ว }
+
+  # ===========================================================================
+  # Admin — ตั้งค่าระบบ
+  # ===========================================================================
+  /admin/settings:
+    get:
+      tags: [Admin - System]
+      summary: ค่าระดับระบบ
+      x-roles: [admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemSettings' }
+    patch:
+      tags: [Admin - System]
+      summary: แก้ค่าระดับระบบ (ระยะเก็บรูป/บันทึก, เกณฑ์ล็อกบัญชี, เวอร์ชันประกาศ)
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SystemSettings' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemSettings' }
+
+  /healthz:
+    get:
+      tags: [Admin - System]
+      summary: ตรวจสุขภาพระบบ (ใช้กับ uptime monitor)
+      x-roles: [public]
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  db: { type: boolean }
+
+# =============================================================================
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: wr-session
+      description: "คุกกี้ httpOnly, Secure, SameSite=Lax — คำขอที่เปลี่ยนข้อมูลต้องมี header `X-Requested-With: workingrun` (กัน CSRF)"
+
+  parameters:
+    SeasonId: { name: seasonId, in: path, required: true, schema: { type: string, format: uuid } }
+    RunId: { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
+    UserId: { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    Cursor: { name: cursor, in: query, schema: { type: string }, description: ค่า nextCursor จากหน้าก่อน }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string, format: uuid }
+      description: กันกดส่งซ้ำเมื่อเน็ตมือถือหลุด — ส่งค่าเดิมซ้ำภายใน 24 ชม. จะได้ผลเดิม
+
+  responses:
+    ValidationError:
+      description: ข้อมูลไม่ถูกรูปแบบ (`VALIDATION_ERROR`, `details.fields`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    BusinessRuleViolation:
+      description: ผิดกฎธุรกิจ — `error.code` เป็นรหัสจากฐานข้อมูล เช่น `RUN_DATE_TOO_OLD`
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthenticated:
+      description: ยังไม่ล็อกอิน หรือ session หมดอายุ (`NOT_AUTHENTICATED`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: ไม่มีสิทธิ์ (`FORBIDDEN`, `PASSWORD_CHANGE_REQUIRED`, `CONSENT_REQUIRED`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: ไม่พบ หรือไม่มีสิทธิ์เห็น (`NOT_FOUND`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Conflict:
+      description: ขัดกับข้อมูลที่มีอยู่ เช่น รหัสซ้ำ ฤดูกาลทับกัน (`CONFLICT`, `SEASON_OVERLAP`, `ACTIVE_SEASON_EXISTS`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    InvalidCredentials:
+      description: รหัสพนักงานหรือรหัสผ่านไม่ถูกต้อง (`INVALID_CREDENTIALS` — ไม่บอกว่าผิดช่องไหน)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    AccountLocked:
+      description: ล็อกชั่วคราว (`ACCOUNT_LOCKED`, `details.retryAfterMinutes`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    TurnstileFailed:
+      description: ไม่ผ่านการตรวจกันสแปม (`TURNSTILE_FAILED`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: เรียกถี่เกินไป (`RATE_LIMITED`)
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    FileTooLarge:
+      description: ไฟล์เกิน 2 MB (`FILE_TOO_LARGE`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    UnsupportedFileType:
+      description: ชนิดไฟล์ไม่รองรับ (`UNSUPPORTED_FILE_TYPE`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    EvidencePurged:
+      description: รูปถูกลบตามนโยบายระยะเก็บแล้ว (`EVIDENCE_PURGED`)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: RUN_DATE_TOO_OLD }
+            message: { type: string, example: บันทึกย้อนหลังได้ไม่เกิน 7 วัน }
+            details: { type: object, additionalProperties: true, example: { max_days: 7 } }
+
+    Locale: { type: string, enum: [th, en] }
+    Role: { type: string, enum: [runner, approver, admin] }
+    SeasonStatus: { type: string, enum: [draft, active, closed] }
+    RunStatus: { type: string, enum: [pending, approved, rejected, cancelled, revoked] }
+    FlagCode:
+      type: string
+      enum: [pace_too_fast, pace_too_slow, distance_high, daily_total_high, duplicate_entry, duplicate_image]
+
+    Me:
+      type: object
+      required: [id, employeeCode, displayName, locale, roles, mustChangePassword, needsConsent]
+      properties:
+        id: { type: string, format: uuid }
+        employeeCode: { type: string }
+        displayName: { type: string }
+        department: { oneOf: [{ $ref: '#/components/schemas/Department' }, { type: 'null' }] }
+        locale: { $ref: '#/components/schemas/Locale' }
+        roles: { type: array, items: { $ref: '#/components/schemas/Role' } }
+        mustChangePassword: { type: boolean }
+        needsConsent: { type: boolean, description: true เมื่อยังไม่ยอมรับประกาศฉบับปัจจุบัน }
+
+    Department:
+      type: object
+      required: [id, code, nameTh, nameEn]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, example: IT }
+        nameTh: { type: string }
+        nameEn: { type: string }
+    DepartmentInput:
+      type: object
+      required: [code, nameTh, nameEn]
+      properties:
+        code: { type: string, pattern: '^[A-Z0-9_-]{1,20}$' }
+        nameTh: { type: string, minLength: 1, maxLength: 100 }
+        nameEn: { type: string, minLength: 1, maxLength: 100 }
+
+    Season:
+      type: object
+      required: [id, nameTh, nameEn, startDate, endDate, status, leaderboardVersion]
+      properties:
+        id: { type: string, format: uuid }
+        nameTh: { type: string, example: ฤดูกาล 2/2569 }
+        nameEn: { type: string, example: Season 2/2026 }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        status: { $ref: '#/components/schemas/SeasonStatus' }
+        leaderboardVersion: { type: integer, format: int64 }
+        closedAt: { type: [string, 'null'], format: date-time }
+    SeasonInput:
+      type: object
+      required: [nameTh, nameEn, startDate, endDate]
+      properties:
+        nameTh: { type: string, minLength: 1, maxLength: 100 }
+        nameEn: { type: string, minLength: 1, maxLength: 100 }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+
+    SeasonRulesInput:
+      type: object
+      required: [pointsPerKm, minDistanceKm, maxBackdateDays, maxEvidenceFiles]
+      properties:
+        pointsPerKm: { type: number, exclusiveMinimum: 0, maximum: 1000, multipleOf: 0.01, example: 10 }
+        minDistanceKm: { type: number, minimum: 0.01, multipleOf: 0.01, example: 0.1 }
+        maxBackdateDays: { type: integer, minimum: 0, maximum: 90, example: 7 }
+        maxEvidenceFiles: { type: integer, minimum: 1, maximum: 10, example: 3 }
+        flagMinPaceSecPerKm: { type: [integer, 'null'], minimum: 1, example: 180, description: null = ปิดกฎนี้ }
+        flagMaxPaceSecPerKm: { type: [integer, 'null'], minimum: 1, example: 1200 }
+        flagMaxDistanceKm: { type: [number, 'null'], exclusiveMinimum: 0, example: 42.2 }
+        flagMaxDailyKm: { type: [number, 'null'], exclusiveMinimum: 0, example: 50 }
+    SeasonRules:
+      allOf:
+        - $ref: '#/components/schemas/SeasonRulesInput'
+        - type: object
+          required: [id, seasonId, version, changeReason, createdAt]
+          properties:
+            id: { type: string, format: uuid }
+            seasonId: { type: string, format: uuid }
+            version: { type: integer }
+            changeReason: { type: string }
+            createdBy: { type: [string, 'null'], description: ชื่อที่แสดงของผู้ตั้ง }
+            createdAt: { type: string, format: date-time }
+
+    LeaderboardEntry:
+      type: object
+      required: [rank, userId, displayName, totalPoints, totalDistanceKm, approvedRunCount, reachedAt]
+      properties:
+        rank: { type: integer, minimum: 1 }
+        previousRank: { type: [integer, 'null'], description: 'null = เพิ่งเข้าตาราง; มากกว่า rank = ขึ้น (▲), น้อยกว่า = ลง (▼ สีเทา)' }
+        userId: { type: string, format: uuid }
+        displayName: { type: string }
+        department: { oneOf: [{ $ref: '#/components/schemas/Department' }, { type: 'null' }] }
+        totalPoints: { type: number, example: 155 }
+        totalDistanceKm: { type: number, example: 15.5 }
+        approvedRunCount: { type: integer }
+        reachedAt: { type: string, format: date-time, description: เวลาที่ถึงคะแนนปัจจุบัน (ใช้ตัดสินอันดับเท่ากัน) }
+    Leaderboard:
+      type: object
+      required: [seasonId, version, generatedAt, entries, unranked]
+      properties:
+        seasonId: { type: string, format: uuid }
+        version: { type: integer, format: int64 }
+        generatedAt: { type: string, format: date-time }
+        entries: { type: array, items: { $ref: '#/components/schemas/LeaderboardEntry' } }
+        unranked:
+          type: array
+          description: ผู้มีสิทธิ์ที่ยังไม่มีคะแนน (แสดงท้ายตาราง อันดับ "—")
+          items:
+            type: object
+            required: [userId, displayName]
+            properties:
+              userId: { type: string, format: uuid }
+              displayName: { type: string }
+    ActivityItem:
+      type: object
+      required: [id, userId, displayName, distanceKm, points, at]
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: string, format: uuid }
+        displayName: { type: string, example: ธนพล ส. }
+        distanceKm: { type: number, example: 3.0 }
+        points: { type: number, example: 30 }
+        at: { type: string, format: date-time, description: เวลาที่อนุมัติ }
+    MyStats:
+      type: object
+      required: [seasonId, rank, totalPoints, totalDistanceKm, approvedRunCount, pendingRunCount, participantCount]
+      properties:
+        seasonId: { type: string, format: uuid }
+        rank: { type: [integer, 'null'], description: null = ยังไม่มีคะแนน }
+        previousRank: { type: [integer, 'null'] }
+        totalPoints: { type: number }
+        totalDistanceKm: { type: number }
+        approvedRunCount: { type: integer }
+        pendingRunCount: { type: integer }
+        pendingDistanceKm: { type: number }
+        participantCount: { type: integer }
+        pointsToNextRank: { type: [number, 'null'], description: คะแนนที่ต้องเพิ่มเพื่อแซงอันดับถัดไป }
+
+    UploadedEvidence:
+      type: object
+      required: [objectKey, contentSha256, mimeType, byteSize]
+      properties:
+        objectKey: { type: string, example: 'evidence/10000000-0000-4000-8000-000000000001/0b7c….webp' }
+        contentSha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        mimeType: { type: string }
+        byteSize: { type: integer }
+    RunCreate:
+      type: object
+      required: [runDate, distanceKm, durationSeconds, evidenceKeys]
+      properties:
+        runDate: { type: string, format: date, example: '2026-10-21' }
+        distanceKm: { type: number, exclusiveMinimum: 0, maximum: 500, multipleOf: 0.01, example: 5.2 }
+        durationSeconds: { type: integer, minimum: 1, maximum: 172800, example: 1860, description: ฟอร์มรับ ชม./นาที/วินาที แล้วแปลง }
+        note: { type: string, maxLength: 280 }
+        evidenceKeys:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items: { type: string }
+          description: objectKey จาก /uploads/evidence (server ตรวจว่าไฟล์มีจริงและเป็นของผู้ใช้)
+    Run:
+      type: object
+      required: [id, seasonId, runDate, distanceKm, durationSeconds, paceSecPerKm, status, submittedAt]
+      properties:
+        id: { type: string, format: uuid }
+        seasonId: { type: string, format: uuid }
+        runDate: { type: string, format: date }
+        distanceKm: { type: number }
+        durationSeconds: { type: integer }
+        paceSecPerKm: { type: integer }
+        note: { type: [string, 'null'] }
+        status: { $ref: '#/components/schemas/RunStatus' }
+        points: { type: [number, 'null'], description: คะแนนสุทธิที่ได้จากรายการนี้ (เมื่ออนุมัติ) }
+        submittedAt: { type: string, format: date-time }
+        decidedAt: { type: [string, 'null'], format: date-time }
+        latestReview:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Review'
+    RunDetail:
+      allOf:
+        - $ref: '#/components/schemas/Run'
+        - type: object
+          required: [runner, evidence, reviews]
+          properties:
+            runner:
+              type: object
+              properties:
+                id: { type: string, format: uuid }
+                displayName: { type: string }
+                employeeCode: { type: string, description: เฉพาะผู้ตรวจ/แอดมิน }
+            evidence:
+              type: array
+              items:
+                type: object
+                required: [id, url, purged]
+                properties:
+                  id: { type: string, format: uuid }
+                  url: { type: [string, 'null'], description: 'URL ของรูป (/api/v1/runs/{runId}/evidence/{id}) หรือ null ถ้าถูกลบแล้ว' }
+                  purged: { type: boolean }
+                  purgeAfter: { type: string, format: date-time }
+            flags:
+              type: array
+              description: เฉพาะผู้ตรวจ/แอดมิน
+              items:
+                type: object
+                required: [code]
+                properties:
+                  code: { $ref: '#/components/schemas/FlagCode' }
+                  detail: { type: object, additionalProperties: true }
+            reviews: { type: array, items: { $ref: '#/components/schemas/Review' } }
+    Review:
+      type: object
+      required: [decision, reviewerName, at]
+      properties:
+        decision: { type: string, enum: [approved, rejected, revoked] }
+        reason: { type: [string, 'null'] }
+        reviewerName: { type: string }
+        at: { type: string, format: date-time }
+    ReviewDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approved, rejected] }
+        reason: { type: string, maxLength: 500, description: บังคับเมื่อ rejected }
+
+    LedgerEntry:
+      type: object
+      required: [id, entryType, points, distanceKm, reason, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        entryType: { type: string, enum: [run_approved, run_revoked, manual_adjustment, rule_recalc] }
+        runId: { type: [string, 'null'], format: uuid }
+        points: { type: number }
+        distanceKm: { type: number }
+        reason: { type: string }
+        ruleVersion: { type: [integer, 'null'] }
+        createdBy: { type: [string, 'null'], description: ชื่อผู้ทำ }
+        createdAt: { type: string, format: date-time }
+
+    UserSummary:
+      type: object
+      required: [id, employeeCode, displayName, isActive]
+      properties:
+        id: { type: string, format: uuid }
+        employeeCode: { type: string }
+        displayName: { type: string }
+        department: { oneOf: [{ $ref: '#/components/schemas/Department' }, { type: 'null' }] }
+        isActive: { type: boolean }
+    UserAdmin:
+      allOf:
+        - $ref: '#/components/schemas/UserSummary'
+        - type: object
+          required: [roles, mustChangePassword]
+          properties:
+            roles: { type: array, items: { $ref: '#/components/schemas/Role' } }
+            mustChangePassword: { type: boolean }
+            consentedAt: { type: [string, 'null'], format: date-time }
+            createdAt: { type: string, format: date-time }
+    UserCreate:
+      type: object
+      required: [employeeCode, displayName]
+      properties:
+        employeeCode: { type: string, pattern: '^[A-Za-z0-9._-]{3,32}$' }
+        displayName: { type: string, minLength: 1, maxLength: 60 }
+        departmentId: { type: [string, 'null'], format: uuid }
+        roles: { type: array, uniqueItems: true, default: [runner], items: { $ref: '#/components/schemas/Role' } }
+        addToSeasonId: { type: string, format: uuid, description: เพิ่มเป็นผู้มีสิทธิ์ในฤดูกาลนี้ทันที }
+    ImportResult:
+      type: object
+      required: [added, alreadyPresent, notFound]
+      properties:
+        added: { type: integer }
+        alreadyPresent: { type: integer }
+        notFound: { type: array, items: { type: string }, description: รหัสพนักงานที่ไม่มีในระบบ }
+
+    DeletionRequest:
+      type: object
+      required: [id, userId, status, requestedAt]
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        displayName: { type: string }
+        status: { type: string, enum: [pending, completed, rejected] }
+        note: { type: [string, 'null'] }
+        requestedAt: { type: string, format: date-time }
+        processedAt: { type: [string, 'null'], format: date-time }
+
+    AuditLog:
+      type: object
+      required: [id, action, entityType, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        actor: { type: [string, 'null'], description: ชื่อผู้ทำ (null = ระบบ) }
+        action: { type: string, enum: [insert, update, delete] }
+        entityType: { type: string }
+        entityId: { type: [string, 'null'] }
+        before: { type: [object, 'null'] }
+        after: { type: [object, 'null'] }
+        reason: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    SystemSettings:
+      type: object
+      properties:
+        evidenceRetentionDays: { type: integer, minimum: 1, maximum: 3650, example: 90 }
+        auditRetentionDays: { type: integer, minimum: 30, maximum: 3650, example: 730 }
+        loginMaxFailures: { type: integer, minimum: 1, maximum: 50, example: 5 }
+        loginLockMinutes: { type: integer, minimum: 1, maximum: 1440, example: 15 }
+        currentPrivacyNoticeVersion: { type: string, example: '2569-1' }
+
+security:
+  - sessionCookie: []
