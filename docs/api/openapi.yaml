@@ -395,7 +395,7 @@ paths:
       description: |
         **ห้ามส่ง** (ตอบ 422): วันที่ในอนาคต, ย้อนหลังเกินกติกา, ระยะต่ำกว่าขั้นต่ำ, ไม่อยู่ในฤดูกาลที่เปิด,
         ไม่ใช่ผู้มีสิทธิ์, ไม่มีรูป · **ติดธง** (ยังบันทึกได้): pace ผิดปกติ, ระยะสูง, รวมต่อวันสูง, ซ้ำ
-        — runner ไม่เห็นธงของตัวเอง (กันการเลี่ยงเกณฑ์)
+        — เจ้าของรายการเห็นธงของตัวเองได้ (เช่น "pace เร็วผิดปกติ")
       x-roles: [runner]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
@@ -442,7 +442,7 @@ paths:
       parameters: [{ $ref: '#/components/parameters/RunId' }]
       responses:
         '200':
-          description: OK — `flags` มีเฉพาะเมื่อผู้เรียกเป็นผู้ตรวจ/แอดมิน
+          description: OK — `flags` เห็นได้ทั้งเจ้าของรายการและผู้ตรวจ/แอดมิน
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RunDetail' }
@@ -1426,6 +1426,10 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/Review'
+        flagCodes:
+          type: array
+          description: ธงผิดปกติของรายการ (แสดงเป็นป้ายในประวัติการวิ่ง)
+          items: { $ref: '#/components/schemas/FlagCode' }
     RunDetail:
       allOf:
         - $ref: '#/components/schemas/Run'
@@ -1450,7 +1454,7 @@ components:
                   purgeAfter: { type: string, format: date-time }
             flags:
               type: array
-              description: เฉพาะผู้ตรวจ/แอดมิน
+              description: ธงผิดปกติ (เจ้าของรายการและผู้ตรวจ/แอดมินเห็น)
               items:
                 type: object
                 required: [code]

@@ -41,7 +41,7 @@
 | ดูประวัติการวิ่ง | `GET /runs/mine` | 👤 | 👤 | 👤 |
 | ดูรายละเอียด/รูปหลักฐาน | `GET /runs/{id}`, `…/evidence/{id}` | 👤 | ✅ | ✅ |
 | ยกเลิกรายการที่รอตรวจ | `POST /runs/{id}/cancel` | 👤 | 👤 | 👤 |
-| ดูธงผิดปกติ | (อยู่ใน `GET /runs/{id}`, `/review/queue`) | — | ✅ | ✅ |
+| ดูธงผิดปกติ | (อยู่ใน `GET /runs/{id}`, `/runs/mine`, `/review/queue`) | 👤 | ✅ | ✅ |
 | ดูคิวรอตรวจ | `GET /review/queue` | — | ✅ ² | ✅ ² |
 | อนุมัติ/ปฏิเสธ (ทีละรายการ/หลายรายการ) | `POST /review/runs/…/decision`, `/bulk-decision` | — | ✅ ² | ✅ ² |
 | เพิกถอนรายการที่อนุมัติแล้ว | `POST /review/runs/{id}/revoke` | — | ✅ ² | ✅ ² |

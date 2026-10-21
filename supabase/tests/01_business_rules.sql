@@ -128,7 +128,12 @@ select pg_temp.check('flagged runs are still pending (not auto-rejected)',
 select pg_temp.login('EMP001');
 select pg_temp.check('runner sees only own runs',
   (select bool_and(user_id = public.current_profile_id()) from public.runs));
-select pg_temp.check('runner cannot read flags', not exists (select 1 from public.run_flags));
+select pg_temp.check('runner sees flags of own runs only',
+  exists (select 1 from public.run_flags)
+  and not exists (select 1 from public.run_flags f join public.runs r on r.id = f.run_id
+                  where r.user_id <> public.current_profile_id())
+  and (select count(*) from public.run_flags) = (select count(*) from public.run_flags f
+        where f.run_id in (select id from t_ids where name in ('fast', 'slow', 'long', 'dup'))));
 select pg_temp.check('runner cannot read other profiles', (select count(*) from public.profiles) = 1);
 select pg_temp.check('runner sees full leaderboard', (select count(*) from public.leaderboard) >= 16);
 select pg_temp.check('public_profiles hides employee_code',

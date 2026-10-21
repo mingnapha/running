@@ -48,8 +48,10 @@ create policy season_participants_read on public.season_participants for select 
 create policy runs_read on public.runs for select to authenticated
   using (user_id = public.current_profile_id() or public.is_reviewer());
 
+-- พนักงานเห็นธงของรายการตัวเองได้ (กิจกรรมเพื่อความสนุก ไม่ต้องซ่อนเกณฑ์)
 create policy run_flags_read on public.run_flags for select to authenticated
-  using (public.is_reviewer());
+  using (public.is_reviewer()
+         or exists (select 1 from public.runs r where r.id = run_id and r.user_id = public.current_profile_id()));
 
 create policy run_reviews_read on public.run_reviews for select to authenticated
   using (public.is_reviewer()
