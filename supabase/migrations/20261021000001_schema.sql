@@ -34,7 +34,7 @@ create unique index departments_code_uk on public.departments (code) where delet
 create table public.profiles (
   id                     uuid primary key default gen_random_uuid(),
   auth_user_id           uuid unique references auth.users (id) on delete set null,
-  employee_code          extensions.citext check (employee_code ~ '^[A-Za-z0-9._-]{3,32}$'),
+  employee_code          extensions.citext not null check (employee_code ~ '^[A-Za-z0-9._-]{3,32}$'),
   display_name           text not null check (length(btrim(display_name)) between 1 and 60),
   department_id          uuid references public.departments (id),
   locale                 text not null default 'th' check (locale in ('th', 'en')),
@@ -42,12 +42,9 @@ create table public.profiles (
   is_active              boolean not null default true,
   privacy_notice_version text,
   consented_at           timestamptz,
-  anonymized_at          timestamptz,
   created_at             timestamptz not null default now(),
   updated_at             timestamptz not null default now(),
   deleted_at             timestamptz,
-  -- ผู้ใช้ที่ยังไม่ถูก anonymize ต้องมีรหัสพนักงาน
-  constraint profiles_code_required check (anonymized_at is not null or employee_code is not null),
   constraint profiles_consent_pair  check ((privacy_notice_version is null) = (consented_at is null))
 );
 create unique index profiles_employee_code_uk on public.profiles (employee_code) where deleted_at is null;

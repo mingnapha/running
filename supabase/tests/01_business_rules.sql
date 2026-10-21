@@ -234,23 +234,35 @@ select pg_temp.expect_error('close blocked while runs pending',
   $q$select public.close_season('50000000-0000-4000-8000-000000000002')$q$, 'SEASON_HAS_PENDING_RUNS');
 
 -- -----------------------------------------------------------------------------
--- PDPA
+-- คำขอลบข้อมูล (ปิดบัญชี + ลบรูป, เก็บประวัติ)
 -- -----------------------------------------------------------------------------
-select public.anonymize_user(pg_temp.pid('EMP005'));
+create temp table t_lb_before as select * from leaderboard_entries;
+grant select on t_lb_before to authenticated;
+select public.close_user_account(pg_temp.pid('EMP005'));
 select pg_temp.logout();
-select pg_temp.check('anonymized user removed from all leaderboards',
-  not exists (select 1 from leaderboard_entries e join profiles p on p.id = e.user_id where p.anonymized_at is not null));
-select pg_temp.check('anonymized profile has no employee code / auth user',
-  (select employee_code is null and auth_user_id is null and display_name = 'ผู้ใช้ที่ลบแล้ว'
-   from profiles where anonymized_at is not null));
-select pg_temp.check('anonymized user evidence scheduled for immediate purge',
+select pg_temp.check('closed account keeps name, code and scores in every season',
+  (select p.employee_code = 'EMP005' and p.display_name = 'กิตติพงษ์ ม.' and not p.is_active
+          and p.auth_user_id is null
+   from profiles p where p.id = pg_temp.pid('EMP005'))
+  and (select count(*) from leaderboard_entries where user_id = pg_temp.pid('EMP005')) = 2);
+select pg_temp.check('closing an account does not change anyone''s rank',
+  not exists (select 1 from t_lb_before b join leaderboard_entries e using (season_id, user_id) where e.rank <> b.rank));
+select pg_temp.check('closed account evidence scheduled for immediate purge',
   (select bool_and(e.purge_after <= now()) from evidence_files e join runs r on r.id = e.run_id
-   join profiles p on p.id = r.user_id where p.anonymized_at is not null));
-select pg_temp.check('ledger history kept after anonymize',
-  exists (select 1 from point_ledger l join profiles p on p.id = l.user_id where p.anonymized_at is not null));
-select pg_temp.check('audit log never stores employee_code',
-  not exists (select 1 from audit_logs where entity_type = 'profiles'
-              and (before_data ->> 'employee_code' ~ '^EMP' or after_data ->> 'employee_code' ~ '^EMP')));
+   where r.user_id = pg_temp.pid('EMP005')));
+select pg_temp.check('closed account cannot act (no profile resolved)',
+  not exists (select 1 from user_roles where user_id = pg_temp.pid('EMP005')));
+select pg_temp.check('audit log keeps employee_code for traceability',
+  exists (select 1 from audit_logs where entity_type = 'profiles' and after_data ->> 'employee_code' = 'EMP005'));
+
+-- ปิดฤดูกาลได้เมื่อตรวจครบเท่านั้น
+select pg_temp.login('EMP010');
+select public.review_runs_bulk(array_agg(id), 'approved') from public.runs
+  where season_id = '50000000-0000-4000-8000-000000000002' and status = 'pending';
+select public.close_season('50000000-0000-4000-8000-000000000002', 'ครบกำหนด');
+select pg_temp.logout();
+select pg_temp.check('season closes once every run is reviewed',
+  (select status from seasons where id = '50000000-0000-4000-8000-000000000002') = 'closed');
 
 -- login lockout
 select public.record_login_attempt(repeat('b', 64), null, false) from generate_series(1, 5);

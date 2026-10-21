@@ -154,9 +154,9 @@ grant execute on function
   public.review_runs_bulk(uuid[], public.review_decision, text),
   public.adjust_points(uuid, uuid, numeric, text),
   public.recalculate_season(uuid, text),
-  public.close_season(uuid, boolean, text),
+  public.close_season(uuid, text),
   public.copy_participants(uuid, uuid),
-  public.anonymize_user(uuid, uuid)
+  public.close_user_account(uuid, uuid)
 to authenticated;
 
 -- service_role เท่านั้น (เรียกจาก server/cron)

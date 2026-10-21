@@ -40,8 +40,8 @@ erDiagram
 
     profiles {
         uuid id PK
-        uuid auth_user_id UK "FK auth.users, NULL หลังลบข้อมูล"
-        citext employee_code UK "username, NULL หลัง anonymize"
+        uuid auth_user_id UK "FK auth.users, NULL หลังปิดบัญชี"
+        citext employee_code UK "username"
         text display_name "ชื่อที่แสดงบนตาราง"
         uuid department_id FK "NULL ได้"
         text locale "th or en"
@@ -49,7 +49,6 @@ erDiagram
         boolean is_active
         text privacy_notice_version
         timestamptz consented_at
-        timestamptz anonymized_at "PDPA"
         timestamptz created_at
         timestamptz updated_at
         timestamptz deleted_at "soft delete"
@@ -257,7 +256,7 @@ erDiagram
 | ตาราง | หน้าที่ | หมายเหตุ |
 |---|---|---|
 | `audit_logs` | บันทึกการเปลี่ยนแปลงข้อมูลสำคัญ (ฤดูกาล, กติกา, บทบาท, ผู้ใช้, สถานะรายการวิ่ง) | เขียนด้วย trigger ทั่วไป `audit_trigger()` · append-only · ลบอัตโนมัติเมื่อเกิน `audit_retention_days` · index `(entity_type, entity_id, created_at)` |
-| `data_deletion_requests` | คำขอลบข้อมูลตาม PDPA | แอดมินดำเนินการ → ฟังก์ชัน `anonymize_user()` (ดูหัวข้อ 3.6) |
+| `data_deletion_requests` | คำขอลบข้อมูลตาม PDPA | แอดมินดำเนินการ → ฟังก์ชัน `close_user_account()` (ดูหัวข้อ 3.6) |
 | `system_settings` | ค่าระดับระบบ (ระยะเก็บข้อมูล, เวอร์ชันประกาศความเป็นส่วนตัว) | singleton (`CHECK id = 1`) — แยกจากกติกาต่อฤดูกาล เพราะนโยบายเก็บข้อมูลไม่ควรเปลี่ยนตามฤดูกาล |
 | `login_attempts` | นับการล็อกอินผิดเพื่อล็อกชั่วคราว (ร่วมกับ Turnstile) | เก็บเฉพาะ hash ของ username/IP · ลบเมื่อเกิน 30 วัน |
 
@@ -320,13 +319,11 @@ ORDER BY total_points DESC, reached_at ASC, user_id ASC
 ### 3.6 PDPA
 - **เก็บเท่าที่จำเป็น:** ไม่มีอีเมล เบอร์โทร วันเกิด หรือ GPS · ลบ EXIF ออกจากรูปฝั่ง client ก่อนอัปโหลด · `login_attempts` เก็บแค่ hash
 - **รูปหลักฐาน 90 วัน:** `evidence_files.purge_after` + job รายวัน (GitHub Actions cron หรือ Vercel Cron — ฟรีทั้งคู่) ลบไฟล์ใน R2 แล้วตั้ง `purged_at`
-- **คำขอลบข้อมูล → `anonymize_user(user_id)`** ใน transaction เดียว:
-  1. ตั้ง `purge_after = now()` ให้รูปทั้งหมดของผู้ใช้ (job ลบไฟล์ทันทีในรอบถัดไป)
-  2. `profiles`: `employee_code = NULL`, `display_name = 'ผู้ใช้ที่ลบแล้ว'`, `department_id = NULL`, `anonymized_at = now()`
-  3. ลบ `auth.users` (→ `auth_user_id = NULL` ด้วย `ON DELETE SET NULL`) และ `user_roles`
-  4. ลบ `runs.note` (ข้อความอิสระอาจมีข้อมูลส่วนตัว)
-  5. ลบแถวใน `leaderboard_entries` ของทุกฤดูกาลแล้วคำนวณอันดับใหม่
-  6. `point_ledger`/`audit_logs` เก็บไว้แต่ผูกกับ UUID ที่ระบุตัวตนไม่ได้แล้ว
+- **คำขอลบข้อมูล → `close_user_account(user_id)`** (ปรับตามที่ตกลงในขั้นที่ 3):
+  1. ตั้ง `purge_after = now()` ให้รูปทั้งหมดของผู้ใช้ (job ลบไฟล์ในรอบถัดไป)
+  2. ยกเลิกรายการที่ยังรอตรวจ, `is_active = false`, ลบ `user_roles` และบัญชี `auth.users` (ล็อกอินไม่ได้อีก)
+  3. **เก็บ** ชื่อ รหัสพนักงาน คะแนน อันดับย้อนหลัง และ audit log ไว้ครบ — ระบบใช้ภายใน และจะลบทั้งระบบเมื่อจบโครงการ
+  4. ต้องระบุนโยบายนี้ในประกาศความเป็นส่วนตัว (ระยะเก็บ = จนจบโครงการ)
 - **ระยะเก็บ audit log** ตั้งได้ใน `system_settings` (ค่าเริ่ม 2 ปี)
 
 ### 3.7 ความปลอดภัย (RLS)

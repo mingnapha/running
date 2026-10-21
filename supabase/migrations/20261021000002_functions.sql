@@ -150,7 +150,7 @@ end $$;
 create trigger departments_audit after insert or update or delete on public.departments
   for each row execute function public.audit_trigger();
 create trigger profiles_audit after insert or update or delete on public.profiles
-  for each row execute function public.audit_trigger('employee_code', 'display_name');
+  for each row execute function public.audit_trigger();
 create trigger user_roles_audit after insert or update or delete on public.user_roles
   for each row execute function public.audit_trigger();
 -- ไม่บันทึกการเพิ่ม leaderboard_version (เกิดทุกครั้งที่อนุมัติ — ledger บันทึกไว้แล้ว)
@@ -163,11 +163,11 @@ create trigger season_rules_audit after insert on public.season_rules
 create trigger season_participants_audit after insert or update or delete on public.season_participants
   for each row execute function public.audit_trigger();
 create trigger runs_audit after insert or update of status on public.runs
-  for each row execute function public.audit_trigger('note');
+  for each row execute function public.audit_trigger();
 create trigger system_settings_audit after update on public.system_settings
   for each row execute function public.audit_trigger();
 create trigger ddr_audit after insert or update on public.data_deletion_requests
-  for each row execute function public.audit_trigger('note');
+  for each row execute function public.audit_trigger();
 
 create or replace function public.set_audit_reason(p_reason text)
 returns void language sql
@@ -267,7 +267,8 @@ begin
   select s.* into v_season from public.seasons s
   where s.deleted_at is null
     and new.run_date between s.start_date and s.end_date
-    and (s.status = 'active' or v_bypass);
+    and (s.status = 'active' or v_bypass)
+  for share;
   if v_season.id is null then
     perform public.raise_app_error('NO_ACTIVE_SEASON_FOR_DATE', jsonb_build_object('run_date', new.run_date));
   end if;
@@ -485,7 +486,6 @@ begin
     select l.user_id, coalesce(l.run_id::text, 'adj:' || l.id) as source_key,
            sum(l.points) as points, sum(l.distance_km) as distance_km, min(l.effective_at) as effective_at
     from public.point_ledger l
-    join public.profiles p on p.id = l.user_id and p.anonymized_at is null
     where l.season_id = p_season_id
     group by l.user_id, coalesce(l.run_id::text, 'adj:' || l.id)
   ), totals as (
@@ -758,21 +758,20 @@ begin
   return v_n;
 end $$;
 
-create or replace function public.close_season(p_season_id uuid, p_force boolean default false, p_reason text default null)
+-- ปิดได้เมื่อตรวจครบทุกรายการแล้วเท่านั้น (ไม่มีการบังคับปิด)
+create or replace function public.close_season(p_season_id uuid, p_reason text default null)
 returns void language plpgsql security definer
 set search_path = ''
 as $$
-declare v_pending int; v_id uuid;
+declare v_pending int;
 begin
   perform public.require_admin();
+  -- ล็อกฤดูกาลก่อนนับ กันรายการใหม่เข้ามาระหว่างปิด
+  perform 1 from public.seasons s where s.id = p_season_id for update;
   select count(*) into v_pending from public.runs r where r.season_id = p_season_id and r.status = 'pending';
-  if v_pending > 0 and not p_force then
+  if v_pending > 0 then
     perform public.raise_app_error('SEASON_HAS_PENDING_RUNS', jsonb_build_object('pending', v_pending));
   end if;
-  for v_id in select r.id from public.runs r where r.season_id = p_season_id and r.status = 'pending' loop
-    perform public._review_run(v_id, 'rejected', coalesce(p_reason, 'ปิดฤดูกาลก่อนได้รับการตรวจ'));
-  end loop;
-  perform public.refresh_leaderboard(p_season_id);
   perform public.set_audit_reason(p_reason);
   perform set_config('app.closing_season', 'on', true);
   update public.seasons set status = 'closed' where id = p_season_id and status = 'active';
@@ -790,7 +789,7 @@ begin
   insert into public.season_participants (season_id, user_id, added_by)
   select p_to_season, sp.user_id, public.current_profile_id()
   from public.season_participants sp
-  join public.profiles p on p.id = sp.user_id and p.deleted_at is null and p.anonymized_at is null
+  join public.profiles p on p.id = sp.user_id and p.deleted_at is null and p.is_active
   where sp.season_id = p_from_season and sp.removed_at is null
   on conflict (season_id, user_id) do update set removed_at = null
     where public.season_participants.removed_at is not null;
@@ -820,41 +819,30 @@ begin
   return v_id;
 end $$;
 
--- PDPA: ทำให้เป็นนิรนาม (การลบบัญชี auth.users ทำในฟังก์ชันนี้ด้วย)
-create or replace function public.anonymize_user(p_user_id uuid, p_request_id uuid default null)
+-- คำขอลบข้อมูล: ปิดบัญชี + ลบรูปหลักฐานทันที
+-- ชื่อ รหัสพนักงาน คะแนน และอันดับย้อนหลัง "เก็บไว้" ตามนโยบายองค์กร (ระบบภายใน ลบทั้งระบบเมื่อจบโครงการ)
+create or replace function public.close_user_account(p_user_id uuid, p_request_id uuid default null)
 returns void language plpgsql security definer
 set search_path = ''
 as $$
-declare v_auth uuid; v_season uuid;
+declare v_auth uuid;
 begin
   perform public.require_admin();
-  if p_user_id = public.current_profile_id() then perform public.raise_app_error('CANNOT_ANONYMIZE_SELF'); end if;
-  perform public.set_audit_reason('PDPA data deletion request');
+  if p_user_id = public.current_profile_id() then perform public.raise_app_error('CANNOT_CLOSE_OWN_ACCOUNT'); end if;
+  perform public.set_audit_reason('data deletion request');
 
-  select p.auth_user_id into v_auth from public.profiles p where p.id = p_user_id and p.anonymized_at is null for update;
+  select p.auth_user_id into v_auth from public.profiles p
+  where p.id = p_user_id and p.is_active for update;
   if not found then perform public.raise_app_error('USER_NOT_FOUND'); end if;
 
   update public.evidence_files e set purge_after = now()
   from public.runs r where r.id = e.run_id and r.user_id = p_user_id and e.purged_at is null;
 
-  update public.runs set note = null where user_id = p_user_id and note is not null;
+  update public.runs set status = 'cancelled' where user_id = p_user_id and status = 'pending';
 
-  update public.profiles set
-    employee_code = null,
-    display_name = 'ผู้ใช้ที่ลบแล้ว',
-    department_id = null,
-    is_active = false,
-    anonymized_at = now(),
-    deleted_at = now()
-  where id = p_user_id;
-
+  update public.profiles set is_active = false where id = p_user_id;
   delete from public.user_roles where user_id = p_user_id;
-  update public.season_participants set removed_at = now() where user_id = p_user_id and removed_at is null;
   if v_auth is not null then delete from auth.users where id = v_auth; end if;
-
-  for v_season in select distinct e.season_id from public.leaderboard_entries e where e.user_id = p_user_id loop
-    perform public.refresh_leaderboard(v_season);
-  end loop;
 
   if p_request_id is not null then
     update public.data_deletion_requests
@@ -931,19 +919,19 @@ $$;
 create view public.public_profiles with (security_barrier) as
   select p.id, p.display_name, p.department_id
   from public.profiles p
-  where p.deleted_at is null and p.anonymized_at is null;
+  where p.deleted_at is null;
 
 create view public.leaderboard with (security_barrier) as
   select e.season_id, e.user_id, p.display_name, d.code as department_code, d.name_th as department_name_th,
          d.name_en as department_name_en, e.total_points, e.total_distance_km, e.approved_run_count,
          e.reached_at, e.rank, e.previous_rank, e.updated_at
   from public.leaderboard_entries e
-  join public.profiles p on p.id = e.user_id and p.anonymized_at is null
+  join public.profiles p on p.id = e.user_id
   left join public.departments d on d.id = p.department_id and d.deleted_at is null;
 
 create view public.activity_feed with (security_barrier) as
   select l.id, l.season_id, l.user_id, p.display_name, l.distance_km, l.points, l.created_at
   from public.point_ledger l
   join public.runs r on r.id = l.run_id and r.status = 'approved'
-  join public.profiles p on p.id = l.user_id and p.anonymized_at is null
+  join public.profiles p on p.id = l.user_id
   where l.entry_type = 'run_approved';

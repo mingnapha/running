@@ -22,7 +22,7 @@
 | `supabase/migrations/20261021000003_rls.sql` | RLS ทุกตาราง + grant ระดับคอลัมน์/ฟังก์ชัน |
 | `supabase/seed.sql` | 10 คน, 3 แผนก, 2 ฤดูกาล (dev/staging เท่านั้น) |
 | `supabase/tests/00_local_supabase_shim.sql` | จำลอง `auth.*` และ role ของ Supabase เพื่อทดสอบบน Postgres เปล่า |
-| `supabase/tests/01_business_rules.sql` | 48 เทส: กฎห้ามส่ง, ติดธง, RLS, อนุมัติ/เพิกถอน, อันดับเท่ากัน, append-only, กติกาเวอร์ชัน, PDPA, ล็อกบัญชี |
+| `supabase/tests/01_business_rules.sql` | 56 เทส: กฎห้ามส่ง, ติดธง, RLS, อนุมัติ/เพิกถอน, อันดับเท่ากัน, append-only, กติกาเวอร์ชัน, ปิดฤดูกาล, ปิดบัญชี, ล็อกบัญชี |
 | `supabase/tests/run_local.sh` | สร้าง DB ใหม่ → migration → seed → tests |
 
 ## วิธีรัน
@@ -35,12 +35,13 @@ supabase db reset            # รัน migrations + seed.sql
 PGHOST=localhost PGUSER=postgres ./supabase/tests/run_local.sh
 ```
 
-ผลการรันล่าสุด (Postgres 16): migration ผ่าน, seed ผ่าน, **48/48 เทสผ่าน**
+ผลการรันล่าสุด (Postgres 16): migration ผ่าน, seed ผ่าน, **56/56 เทสผ่าน**
 
 ## จุดที่เปลี่ยนจากขั้นที่ 2 / ขั้นที่ 1
 
 1. **แก้ไขรายการวิ่ง:** พนักงานแก้ค่าไม่ได้ — ทำได้แค่ "ยกเลิก" ตอนรอตรวจแล้วส่งใหม่ (DB บล็อกการแก้ระยะ/เวลา/วันที่ทุกกรณีด้วย `RUN_IMMUTABLE`) เพื่อให้หลักฐานกับตัวเลขที่ผู้ตรวจเห็นตรงกันเสมอ
-2. **ปิดฤดูกาล:** ต้องผ่าน `close_season()` เท่านั้น — ถ้ายังมีรายการค้างตรวจจะปิดไม่ได้ เว้นแต่ส่ง `force` ซึ่งจะปฏิเสธรายการที่ค้างพร้อมเหตุผล "ปิดฤดูกาลก่อนได้รับการตรวจ"
+2. **ปิดฤดูกาล:** ต้องผ่าน `close_season()` เท่านั้น และปิดได้เมื่อ **ตรวจครบทุกรายการแล้ว** — ไม่มีการบังคับปิด (ล็อกแถวฤดูกาลระหว่างปิด กันรายการใหม่แทรกเข้ามา)
+5. **คำขอลบข้อมูล:** `close_user_account()` ปิดบัญชีและลบรูปทันที แต่ **เก็บ** ชื่อ รหัสพนักงาน คะแนน อันดับย้อนหลัง และ audit log ไว้ครบ (ระบบภายใน ลบทั้งระบบเมื่อจบโครงการ) — อันดับของคนอื่นไม่เปลี่ยน
 3. **Real-time ping:** ส่ง 1 ping ต่อ 1 transaction (อนุมัติหลายรายการ = ping เดียว) แทนการ debounce เพราะการอนุมัติเกิดไม่บ่อย
 4. **ไม่ใช้ `btree_gist`:** exclusion constraint บน `daterange` ใช้ GiST ในตัวได้เลย
 
@@ -54,7 +55,7 @@ PGHOST=localhost PGUSER=postgres ./supabase/tests/run_local.sh
 | ปรับคะแนนด้วยมือ / คำนวณย้อนหลัง | `adjust_points()`, `recalculate_season()` | admin |
 | สร้างฤดูกาล / แก้กติกา / ผู้มีสิทธิ์ | ตารางตรง (RLS + grant ระดับคอลัมน์) | admin |
 | สร้างบัญชีพนักงาน | Supabase Auth Admin API → `admin_provision_user()` | server (service_role) ในนามแอดมิน |
-| ลบข้อมูลตาม PDPA | `anonymize_user()` | admin |
+| คำขอลบข้อมูล (ปิดบัญชี + ลบรูป) | `close_user_account()` | admin |
 | ลบรูปหมดอายุ, ลบ audit เก่า, ตรวจล็อกบัญชี | `evidence_due_for_purge()` ฯลฯ | Cron Trigger / server (service_role) |
 | แก้หรือลบ `point_ledger`, `run_reviews`, `audit_logs` | **ไม่มีใครทำได้** (trigger บล็อกแม้ superuser) | — |
 
@@ -65,7 +66,7 @@ PGHOST=localhost PGUSER=postgres ./supabase/tests/run_local.sh
 `INVALID_RUN_TRANSITION`, `RUN_NOT_FOUND`, `RUN_NOT_PENDING`, `RUN_NOT_APPROVED`, `CANNOT_REVIEW_OWN_RUN`,
 `SEASON_NOT_ACTIVE`, `SEASON_CLOSED`, `SEASON_HAS_PENDING_RUNS`, `USE_CLOSE_SEASON`, `INVALID_SEASON_TRANSITION`,
 `SEASON_DELETE_ONLY_DRAFT`, `BULK_LIMIT_EXCEEDED`, `BULK_REVOKE_NOT_ALLOWED`, `FORBIDDEN`, `NOT_AUTHENTICATED`,
-`PRIVACY_NOTICE_OUTDATED`, `DELETION_ALREADY_REQUESTED`, `CANNOT_ANONYMIZE_SELF`, `USER_NOT_FOUND`, `APPEND_ONLY`
+`PRIVACY_NOTICE_OUTDATED`, `DELETION_ALREADY_REQUESTED`, `CANNOT_CLOSE_OWN_ACCOUNT`, `USER_NOT_FOUND`, `APPEND_ONLY`
 
 ทั้งหมดใช้ SQLSTATE `WR001` และ `message` = รหัส, `detail` = JSON ค่าประกอบ (เช่น `{"max_days": 7}`)
 
