@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "workingrun",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "r2_buckets": [
+    {
+      "binding": "EVIDENCE_BUCKET",
+      "bucket_name": "workingrun-evidence"
+    }
+  ],
+  // งานรายวัน 03:00 น. เวลาไทย (20:00 UTC): ลบรูปครบ 90 วัน, ไฟล์กำพร้า, audit log เก่า
+  "triggers": {
+    "crons": ["0 20 * * *"]
+  },
+  "vars": {
+    "AUTH_EMAIL_DOMAIN": "users.workingrun.internal"
+  },
+  // ค่าลับตั้งด้วย `npx wrangler secret put <NAME>`:
+  //   SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+  //   TURNSTILE_SECRET_KEY, NEXT_PUBLIC_TURNSTILE_SITE_KEY, LOGIN_HASH_SALT
+  "observability": { "enabled": true }
+}

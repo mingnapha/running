@@ -130,6 +130,8 @@ create table public.runs (
   pace_sec_per_km   int generated always as (round(duration_seconds / distance_km)::int) stored,
   note              text check (length(note) <= 280),
   status            public.run_status not null default 'pending',
+  -- Idempotency-Key จากหน้าเว็บ กันกดส่งซ้ำเมื่อเน็ตมือถือหลุด
+  client_request_id uuid,
   submitted_at      timestamptz not null default now(),
   decided_at        timestamptz,
   created_at        timestamptz not null default now(),
@@ -140,6 +142,7 @@ create index runs_user_history_idx on public.runs (user_id, season_id, run_date 
 create index runs_pending_queue_idx on public.runs (season_id, submitted_at) where status = 'pending';
 create index runs_user_day_idx on public.runs (user_id, run_date) where status in ('pending', 'approved');
 create index runs_season_status_idx on public.runs (season_id, status);
+create unique index runs_client_request_uk on public.runs (user_id, client_request_id) where client_request_id is not null;
 
 create table public.run_flags (
   run_id      uuid not null references public.runs (id) on delete cascade,

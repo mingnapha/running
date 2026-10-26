@@ -31,8 +31,9 @@ alter table public.login_attempts         enable row level security;
 create policy departments_read on public.departments for select to authenticated
   using (deleted_at is null or public.has_role('admin'));
 
+-- ผู้ตรวจต้องเห็นชื่อและรหัสพนักงานของเจ้าของรายการในคิว
 create policy profiles_read on public.profiles for select to authenticated
-  using (id = public.current_profile_id() or public.has_role('admin'));
+  using (id = public.current_profile_id() or public.is_reviewer());
 
 create policy user_roles_read on public.user_roles for select to authenticated
   using (user_id = public.current_profile_id() or public.has_role('admin'));
@@ -146,7 +147,7 @@ grant execute on function
   public.audit_actor(),
   public.rules_bypassed(),
   public.current_rule(uuid),
-  public.submit_run(date, numeric, int, text, jsonb),
+  public.submit_run(date, numeric, int, text, jsonb, uuid),
   public.cancel_run(uuid),
   public.update_my_profile(text, text),
   public.accept_privacy_notice(text),

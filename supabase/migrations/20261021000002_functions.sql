@@ -533,8 +533,10 @@ end $$;
 
 -- บันทึกการวิ่ง + รูปหลักฐานใน transaction เดียว
 -- p_evidence: [{ "object_key", "content_sha256", "mime_type", "byte_size" }]
+-- p_client_request_id: ส่งค่าเดิมซ้ำ → ได้รายการเดิมกลับไป (ไม่สร้างซ้ำ)
 create or replace function public.submit_run(
-  p_run_date date, p_distance_km numeric, p_duration_seconds int, p_note text, p_evidence jsonb)
+  p_run_date date, p_distance_km numeric, p_duration_seconds int, p_note text, p_evidence jsonb,
+  p_client_request_id uuid default null)
 returns public.runs language plpgsql security definer
 set search_path = ''
 as $$
@@ -544,16 +546,21 @@ declare
   v_item jsonb;
 begin
   if v_user is null then perform public.raise_app_error('NOT_AUTHENTICATED'); end if;
+  if p_client_request_id is not null then
+    select r.* into v_run from public.runs r
+    where r.user_id = v_user and r.client_request_id = p_client_request_id;
+    if v_run.id is not null then return v_run; end if;
+  end if;
   if p_evidence is null or jsonb_typeof(p_evidence) <> 'array' or jsonb_array_length(p_evidence) = 0 then
     perform public.raise_app_error('EVIDENCE_REQUIRED');
   end if;
 
-  insert into public.runs (user_id, season_id, rule_id, run_date, distance_km, duration_seconds, note)
-  values (v_user, null, null, p_run_date, p_distance_km, p_duration_seconds, nullif(btrim(p_note), ''))
+  insert into public.runs (user_id, season_id, rule_id, run_date, distance_km, duration_seconds, note, client_request_id)
+  values (v_user, null, null, p_run_date, p_distance_km, p_duration_seconds, nullif(btrim(p_note), ''), p_client_request_id)
   returning * into v_run;
 
   for v_item in select * from jsonb_array_elements(p_evidence) loop
-    -- object key ต้องอยู่ใต้โฟลเดอร์ของผู้ใช้เอง (server เป็นคนออก presigned URL ตาม prefix นี้)
+    -- object key ต้องอยู่ใต้โฟลเดอร์ของผู้ใช้เอง (server อัปโหลดไฟล์ไว้ตาม prefix นี้)
     if not coalesce((v_item ->> 'object_key') like ('evidence/' || v_user || '/%'), false) then
       perform public.raise_app_error('INVALID_EVIDENCE_KEY');
     end if;
@@ -928,6 +935,13 @@ create view public.leaderboard with (security_barrier) as
   from public.leaderboard_entries e
   join public.profiles p on p.id = e.user_id
   left join public.departments d on d.id = p.department_id and d.deleted_at is null;
+
+-- รายชื่อผู้มีสิทธิ์เล่น (ชื่อที่แสดงเท่านั้น) — ใช้แสดงผู้ที่ยังไม่มีคะแนนท้ายตาราง
+create view public.season_roster with (security_barrier) as
+  select sp.season_id, p.id as user_id, p.display_name
+  from public.season_participants sp
+  join public.profiles p on p.id = sp.user_id and p.deleted_at is null
+  where sp.removed_at is null;
 
 create view public.activity_feed with (security_barrier) as
   select l.id, l.season_id, l.user_id, p.display_name, l.distance_km, l.points, l.created_at

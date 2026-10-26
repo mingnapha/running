@@ -147,6 +147,12 @@ select pg_temp.expect_error('runner cannot update season (RLS)',
   $q$do $d$ begin update public.seasons set name_th = 'x';
      if found then raise exception 'UPDATED'; end if; raise exception 'NO_ROWS'; end $d$$q$, 'NO_ROWS');
 select public.cancel_run((select id from t_ids where name = 'slow'));
+select pg_temp.check('same client_request_id returns the same run (idempotent)',
+  (select (public.submit_run(public.app_today(), 2.5, 900, null, pg_temp.ev('EMP001'), '00000000-0000-4000-8000-0000000000aa')).id
+        = (public.submit_run(public.app_today(), 2.5, 900, null, pg_temp.ev('EMP001'), '00000000-0000-4000-8000-0000000000aa')).id));
+select pg_temp.check('roster lists participants without employee codes',
+  (select count(*) from public.season_roster where season_id = '50000000-0000-4000-8000-000000000002') = 10
+  and not exists (select 1 from information_schema.columns where table_name = 'season_roster' and column_name = 'employee_code'));
 select pg_temp.check('runner can cancel own pending run',
   (select status from public.runs where id = (select id from t_ids where name = 'slow')) = 'cancelled');
 select pg_temp.logout();
@@ -159,6 +165,7 @@ select from public.submit_run(public.app_today(), 2, 720, null, pg_temp.ev('EMP0
 select pg_temp.expect_error('approver cannot approve own run',
   $q$select public.review_run((select id from public.runs where user_id = public.current_profile_id()
                                 and status = 'pending' limit 1), 'approved')$q$, 'CANNOT_REVIEW_OWN_RUN');
+select pg_temp.check('approver can read runner profiles for the queue', (select count(*) from public.profiles) >= 10);
 select pg_temp.expect_error('reject requires reason',
   format($q$select public.review_run(%L, 'rejected', '  ')$q$, (select id from t_ids where name = 'dup')),
   '%run_reviews_reason_required%');
