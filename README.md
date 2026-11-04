@@ -14,6 +14,7 @@
 | 4 | [API spec](docs/04-api-spec.md) · [OpenAPI](docs/api/openapi.yaml) |
 | 5 | [แผนพัฒนาแบ่งเฟส](docs/05-development-plan.md) |
 | 6 | [MVP: สิ่งที่ทำแล้วและวิธีใช้งาน](docs/06-mvp.md) |
+| — | [ทดลองขึ้นเว็บบน Cloudflare (ไม่ต้องใช้คำสั่ง)](docs/07-deploy-cloudflare.md) |
 
 ## โครงสร้าง
 
