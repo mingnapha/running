@@ -90,3 +90,28 @@
 ## เมื่อเลิกทดลอง
 
 ข้อมูลตัวอย่างและรหัสผ่านที่รู้กันใช้สำหรับสาธิตเท่านั้น — ตอนใช้งานจริงให้สร้างโปรเจกต์ Supabase ใหม่ และรันเฉพาะ migrations (ไม่รันข้อมูลตัวอย่าง)
+
+## ปรับเพดานการอัปโหลดรูป (ไม่ต้องแก้โค้ด)
+
+ค่าทั้งหมดเก็บในตาราง `system_settings` — แก้ได้ใน Supabase → SQL Editor แล้วมีผลทันที
+
+| ค่า | เริ่มต้น | ความหมาย |
+|---|---|---|
+| `upload_limit_per_user_hour` | 20 | รูปต่อคนต่อชั่วโมง |
+| `upload_limit_per_user_day` | 60 | รูปต่อคนต่อวัน |
+| `upload_limit_global_day` | 1000 | รูปรวมทั้งระบบต่อวัน |
+| `storage_limit_bytes` | 7516192768 (7 GB) | พื้นที่รูปรวม (R2 ฟรี 10 GB) |
+
+```sql
+-- ดูค่าปัจจุบัน
+select upload_limit_per_user_hour, upload_limit_per_user_day, upload_limit_global_day,
+       pg_size_pretty(storage_limit_bytes) as storage_limit from system_settings;
+
+-- ตัวอย่าง: เมื่อเปิดใช้จริง 1,000 คน และยอมจ่ายค่า R2 ส่วนที่เกิน
+update system_settings
+set upload_limit_global_day = 5000,
+    storage_limit_bytes = 30::bigint * 1024 * 1024 * 1024   -- 30 GB (ส่วนเกิน 20 GB ≈ $0.30/เดือน)
+where id = 1;
+```
+
+> เพิ่ม `storage_limit_bytes` เกิน 7 GB เมื่อไหร่ = ยอมให้ R2 คิดเงินส่วนที่เกิน 10 GB ($0.015 ต่อ GB ต่อเดือน)
