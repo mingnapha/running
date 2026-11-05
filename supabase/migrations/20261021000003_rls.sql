@@ -162,6 +162,11 @@ grant execute on function
   public.close_user_account(uuid, uuid)
 to authenticated;
 
+-- service_role (server/cron) ข้าม RLS อยู่แล้ว แต่ยังต้องมีสิทธิ์ระดับตาราง — ให้ไว้ชัดเจน
+-- ไม่พึ่งค่า "Automatically expose new tables" ของโปรเจกต์ Supabase
+grant all on all tables in schema public to service_role;
+grant all on all sequences in schema public to service_role;
+
 -- service_role เท่านั้น (เรียกจาก server/cron)
 grant execute on function
   public.admin_provision_user(uuid, uuid, text, text, uuid, public.app_role[]),
