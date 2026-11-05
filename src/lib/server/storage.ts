@@ -94,7 +94,15 @@ function r2Binding(): R2BucketLike | null {
   }
 }
 
+/** ที่เก็บสำหรับไฟล์ใหม่ */
 export function evidenceStore(): EvidenceStore {
   const bucket = r2Binding();
   return bucket ? r2Store(bucket) : supabaseStore(serviceClient());
+}
+
+/** ที่เก็บของไฟล์เดิม ตาม evidence_files.storage_provider (null = ไม่ได้เปิด R2 แล้ว) */
+export function storeFor(provider: string): EvidenceStore | null {
+  if (provider === "supabase") return supabaseStore(serviceClient());
+  const bucket = r2Binding();
+  return bucket ? r2Store(bucket) : null;
 }

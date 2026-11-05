@@ -2,10 +2,10 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FlagCode, RunStatus } from "@/lib/domain/types";
 import type { EvidenceRef, Paged, Review, Run, RunDetail, UploadedEvidence } from "@/lib/dto";
-import { evidenceBucket } from "../cloudflare";
 import { AppError, unwrap } from "../errors";
 import { sha256Hex } from "../security";
 import type { AuthContext } from "../session";
+import { evidenceStore, storeFor } from "../storage";
 import { num } from "./seasons";
 
 export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
@@ -21,7 +21,7 @@ export function evidencePrefix(profileId: string): string {
 }
 
 // -----------------------------------------------------------------------------
-// อัปโหลดรูป → R2
+// อัปโหลดรูป → R2 หรือ Supabase Storage (ดู ../storage.ts)
 // -----------------------------------------------------------------------------
 export async function uploadEvidence(auth: AuthContext, file: File): Promise<UploadedEvidence> {
   const ext = MIME_EXT[file.type];
@@ -29,13 +29,13 @@ export async function uploadEvidence(auth: AuthContext, file: File): Promise<Upl
   if (file.size === 0) throw new AppError("VALIDATION_ERROR", 400, { fields: { file: "empty" } });
   if (file.size > MAX_UPLOAD_BYTES) throw new AppError("FILE_TOO_LARGE", 413, { max_bytes: MAX_UPLOAD_BYTES });
 
+  // นับโควต้าก่อนเก็บไฟล์ (เกินเพดาน → 429 ไม่มีไฟล์ถูกเก็บ) — กันค่าใช้จ่ายบานปลาย
+  unwrap(await auth.db.rpc("register_evidence_upload"));
+
   const bytes = await file.arrayBuffer();
   const contentSha256 = await sha256Hex(bytes);
   const objectKey = `${evidencePrefix(auth.user.id)}${crypto.randomUUID()}.${ext}`;
-  await evidenceBucket().put(objectKey, bytes, {
-    httpMetadata: { contentType: file.type },
-    customMetadata: { sha256: contentSha256, owner: auth.user.id },
-  });
+  await evidenceStore().put(objectKey, bytes, file.type, { sha256: contentSha256, owner: auth.user.id });
   return { objectKey, contentSha256, mimeType: file.type, byteSize: bytes.byteLength };
 }
 
@@ -52,17 +52,18 @@ export interface SubmitRunInput {
 
 export async function submitRun(auth: AuthContext, input: SubmitRunInput, idempotencyKey: string | null): Promise<Run> {
   const prefix = evidencePrefix(auth.user.id);
-  const bucket = evidenceBucket();
-  // ข้อมูลรูปมาจาก R2 (ที่ server เป็นคนเขียน) ไม่เชื่อค่าที่ client ส่งมา
+  const store = evidenceStore();
+  // ข้อมูลรูปมาจากที่เก็บ (ที่ server เป็นคนเขียน) ไม่เชื่อค่าที่ client ส่งมา
   const evidence = await Promise.all(
     input.evidenceKeys.map(async (key) => {
       if (!key.startsWith(prefix) || key.includes("..")) throw new AppError("INVALID_EVIDENCE_KEY", 422);
-      const head = await bucket.head(key);
-      if (!head || head.customMetadata?.owner !== auth.user.id) throw new AppError("EVIDENCE_NOT_FOUND", 422);
+      const head = await store.head(key);
+      if (!head || head.meta.owner !== auth.user.id) throw new AppError("EVIDENCE_NOT_FOUND", 422);
       return {
         object_key: key,
-        content_sha256: head.customMetadata?.sha256,
-        mime_type: head.httpMetadata?.contentType,
+        storage_provider: store.provider,
+        content_sha256: head.meta.sha256,
+        mime_type: head.contentType,
         byte_size: head.size,
       };
     }),
@@ -250,16 +251,21 @@ export async function getRunDetail(auth: AuthContext, runId: string): Promise<Ru
   return detail!;
 }
 
-/** เปิดรูปหลักฐาน: ตรวจสิทธิ์ผ่าน RLS ก่อน แล้วค่อยอ่านจาก R2 */
+/** เปิดรูปหลักฐาน: ตรวจสิทธิ์ผ่าน RLS ก่อน แล้วค่อยอ่านจากที่เก็บ */
 export async function getEvidenceFile(auth: AuthContext, runId: string, evidenceId: string): Promise<Response> {
   const row = unwrap(
-    await auth.db.from("evidence_files").select("object_key, mime_type, purged_at").eq("id", evidenceId).eq("run_id", runId).maybeSingle(),
-  ) as { object_key: string; mime_type: string; purged_at: string | null } | null;
+    await auth.db
+      .from("evidence_files")
+      .select("object_key, mime_type, purged_at, storage_provider")
+      .eq("id", evidenceId)
+      .eq("run_id", runId)
+      .maybeSingle(),
+  ) as { object_key: string; mime_type: string; purged_at: string | null; storage_provider: string } | null;
   if (!row) throw new AppError("NOT_FOUND", 404);
   if (row.purged_at) throw new AppError("EVIDENCE_PURGED", 410);
-  const obj = await evidenceBucket().get(row.object_key);
-  if (!obj) throw new AppError("EVIDENCE_PURGED", 410);
-  return new Response(obj.body, {
+  const body = await storeFor(row.storage_provider)?.get(row.object_key);
+  if (!body) throw new AppError("EVIDENCE_PURGED", 410);
+  return new Response(body, {
     headers: {
       "content-type": row.mime_type,
       "cache-control": "private, max-age=300",

@@ -276,6 +276,24 @@ select pg_temp.logout();
 select pg_temp.check('season closes once every run is reviewed',
   (select status from seasons where id = '50000000-0000-4000-8000-000000000002') = 'closed');
 
+-- เพดานอัปโหลดรูป (กันค่าใช้จ่ายบานปลาย)
+update system_settings set upload_limit_per_user_hour = 2, upload_limit_global_day = 3;
+select pg_temp.login('EMP002');
+select public.register_evidence_upload();
+select public.register_evidence_upload();
+select pg_temp.expect_error('upload limit per user per hour', $q$select public.register_evidence_upload()$q$, 'UPLOAD_RATE_LIMITED');
+select pg_temp.logout();
+select pg_temp.login('EMP003');
+select public.register_evidence_upload();
+select pg_temp.expect_error('upload limit for the whole system per day', $q$select public.register_evidence_upload()$q$, 'UPLOAD_RATE_LIMITED');
+select pg_temp.expect_error('runner cannot read upload log', $q$select 1 from public.evidence_upload_log$q$, 'permission denied%');
+select pg_temp.logout();
+select pg_temp.check('blocked uploads are not counted', (select count(*) from evidence_upload_log) = 3);
+update system_settings set upload_limit_global_day = 1000, storage_limit_bytes = 1000;
+select pg_temp.login('EMP004');
+select pg_temp.expect_error('uploads stop when photo storage reaches its cap', $q$select public.register_evidence_upload()$q$, 'STORAGE_FULL');
+select pg_temp.logout();
+
 -- login lockout
 select public.record_login_attempt(repeat('b', 64), null, false) from generate_series(1, 5);
 select pg_temp.check('locked after 5 failures', public.is_login_locked(repeat('b', 64)));

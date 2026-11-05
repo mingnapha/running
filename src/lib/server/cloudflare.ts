@@ -1,5 +1,4 @@
 import "server-only";
-import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 /**
  * ส่วนที่ใช้จาก Cloudflare (R2 + Cache API) — ประกาศชนิดเฉพาะเมธอดที่ใช้
@@ -29,17 +28,6 @@ export interface R2BucketLike {
     truncated: boolean;
     cursor?: string;
   }>;
-}
-
-interface CloudflareBindings {
-  EVIDENCE_BUCKET: R2BucketLike;
-}
-
-export function evidenceBucket(): R2BucketLike {
-  const { env } = getCloudflareContext();
-  const bucket = (env as unknown as Partial<CloudflareBindings>).EVIDENCE_BUCKET;
-  if (!bucket) throw new Error("R2 binding EVIDENCE_BUCKET is not configured");
-  return bucket;
 }
 
 interface EdgeCache {

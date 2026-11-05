@@ -288,6 +288,8 @@
     "DELETION_ALREADY_REQUESTED": "You have already requested deletion. An admin will process it.",
     "BULK_REVOKE_NOT_ALLOWED": "Runs can only be revoked one at a time",
     "BULK_LIMIT_EXCEEDED": "Select at most 200 runs at a time",
+    "UPLOAD_RATE_LIMITED": "Too many photo uploads. Please wait a while and try again.",
+    "STORAGE_FULL": "Photo storage is full. Please contact the activity admin.",
     "INTERNAL_ERROR": "System error. Please try again later."
   }
 }

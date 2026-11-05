@@ -18,6 +18,8 @@ export class AppError extends Error {
 /** HTTP status ของรหัสจากฐานข้อมูล (SQLSTATE WR001) — ที่ไม่อยู่ในนี้คือ 422 */
 const DB_CODE_STATUS: Record<string, number> = {
   NOT_AUTHENTICATED: 401,
+  UPLOAD_RATE_LIMITED: 429,
+  STORAGE_FULL: 507,
   FORBIDDEN: 403,
   RUN_NOT_FOUND: 404,
   USER_NOT_FOUND: 404,
